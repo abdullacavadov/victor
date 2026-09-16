@@ -10,7 +10,12 @@ import memory.database as database
 
 
 def normalize_phone(phone_number: str) -> str:
-    digits = re.sub(r"\D+", "", phone_number or "")
+    raw = str(phone_number or "").strip()
+    digits = re.sub(r"\D+", "", raw)
+    if raw.startswith("+"):
+        if not 8 <= len(digits) <= 15:
+            raise ValueError("Telefon nömrəsi etibarlı beynəlxalq formatda deyil.")
+        return digits
     if digits.startswith("994"):
         pass
     elif digits.startswith("0") and len(digits) in (10, 11):
