@@ -15,16 +15,16 @@ def test_normalize_lookup_is_case_and_diacritic_insensitive():
 def test_find_contact_matches_alias(monkeypatch):
     monkeypatch.setattr(
         whatsapp,
-        "_load_contacts",
-        lambda: {
-            "ehmed": {
+        "list_contacts",
+        lambda: [
+            {
                 "display_name": "Əhməd",
+                "contact_key": "ehmed",
                 "value": "+994501234567",
                 "aliases": ["Ami"],
             }
-        },
+        ],
     )
-    monkeypatch.setattr(whatsapp, "_load_phone_book", lambda: {})
 
     contact = whatsapp._find_contact("Ami")
 
@@ -36,15 +36,15 @@ def test_find_contact_matches_alias(monkeypatch):
 def test_find_contact_returns_none_for_unknown_contact(monkeypatch):
     monkeypatch.setattr(
         whatsapp,
-        "_load_contacts",
-        lambda: {
-            "ehmed": {
+        "list_contacts",
+        lambda: [
+            {
                 "display_name": "Əhməd",
+                "contact_key": "ehmed",
                 "value": "+994501234567",
             }
-        },
+        ],
     )
-    monkeypatch.setattr(whatsapp, "_load_phone_book", lambda: {})
 
     assert whatsapp._find_contact("Tanınmayan şəxs") is None
 
