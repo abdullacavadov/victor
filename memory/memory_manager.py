@@ -10,7 +10,7 @@ from memory.repository import upsert_memory
 
 
 def _memory_from_sql() -> dict:
-    """SQL qeydlərini köhnə nested-dict formatına çevirir."""
+    """SQL qeydlərini nested-dict formatına çevirir."""
     memory: dict = {}
     for item in get_sql_memory():
         category = item["category"]
@@ -80,15 +80,8 @@ def format_memory_for_prompt(memory: dict) -> str:
     for category, items in memory.items():
         if isinstance(items, dict):
             for key, val in items.items():
-                if category == "whatsapp_contacts" and isinstance(val, dict):
-                    display_name = val.get("display_name", key)
-                    value = val.get("value", "")
-                    aliases = val.get("aliases", [])
-                    alias_str = f" aliases={', '.join(str(a) for a in aliases)}" if isinstance(aliases, list) and aliases else ""
-                    lines.append(f"  {category}/{display_name}: {value}{alias_str}")
-                else:
-                    value = val.get("value", val) if isinstance(val, dict) else val
-                    lines.append(f"  {category}/{key}: {value}")
+                value = val.get("value", val) if isinstance(val, dict) else val
+                lines.append(f"  {category}/{key}: {value}")
         else:
             lines.append(f"  {category}: {items}")
     return "\n".join(lines)
