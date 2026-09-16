@@ -105,13 +105,20 @@ def _find_contact(recipient_name: str) -> dict | None:
     best_score = 0
     for entry in _contact_candidates():
         names = [entry.get("display_name", ""), entry.get("_key", "")]
+        aliases = entry.get("aliases", [])
+        if isinstance(aliases, list):
+            names.extend(str(alias) for alias in aliases)
+        elif aliases:
+            names.append(str(aliases))
+
         metadata = entry.get("metadata", {})
         if isinstance(metadata, dict):
-            aliases = metadata.get("aliases", [])
-            if isinstance(aliases, list):
-                names.extend(str(alias) for alias in aliases)
-            elif aliases:
-                names.append(str(aliases))
+            metadata_aliases = metadata.get("aliases", [])
+            if isinstance(metadata_aliases, list):
+                names.extend(str(alias) for alias in metadata_aliases)
+            elif metadata_aliases:
+                names.append(str(metadata_aliases))
+
         for name in names:
             score = _match_score(needle, str(name))
             if score > best_score:
@@ -421,7 +428,7 @@ def import_phone_book_from_vcf(vcf_path: str) -> str:
         elif line.upper() == "END:VCARD":
             _flush_card(current_lines)
             current_lines = []
-        else:
+        elif current_lines is not None:
             current_lines.append(line)
 
-    return f"{imported} rehber şəxsi SQL kontaktlarına idxal edildi, {skipped} qeyd atlandı."
+    return f"VCF idxalı tamamlandı: {imported} kontakt əlavə edildi, {skipped} kontakt keçildi."
