@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-import json
-import os
 import re
-import tempfile
 import unicodedata
-from pathlib import Path
 
+from core.results import make_result
 from integrations.google.contacts import (
     create_google_contact,
     delete_google_contact,
     get_google_contacts,
     update_google_contact,
 )
-from core.results import make_result
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-PHONEBOOK_FILE = BASE_DIR / "memory" / "phone_book.json"
+from memory.contacts_repository import (
+    contact_key,
+    delete_contact as delete_sql_contact,
+    find_contact,
+    list_contacts,
+    normalize_lookup,
+    normalize_phone,
+    upsert_contact,
+)
 
 
 def _normalize_lookup(text: str) -> str:
@@ -28,31 +30,7 @@ def _normalize_lookup(text: str) -> str:
 
 
 def _normalize_phone(phone_number: str) -> str:
-    digits = re.sub(r"\D+", "", phone_number or "")
-    if digits.startswith("994"):
-        pass
-    elif digits.startswith("0") and len(digits) in (10, 11):
-        digits = "994" + digits[1:]
-    elif len(digits) == 9:
-        digits = "994" + digits
-    else:
-        raise ValueError("Telefon nömrəsi etibarlı beynəlxalq formatda deyil.")
-    if len(digits) < 8 or len(digits) > 15:
-        raise ValueError("Telefon nömrəsi etibarlı beynəlxalq formatda deyil.")
-    return digits
-
-
-def _contact_key(name: str, phone: str, existing: dict) -> str:
-    base = re.sub(r"[^a-z0-9]+", "_", _normalize_lookup(name)).strip("_") or "contact"
-    if base not in existing:
-        return base
-    candidate = f"{base}_{_normalize_phone(phone)[-6:]}"
-    if candidate not in existing:
-        return candidate
-    index = 2
-    while f"{candidate}_{index}" in existing:
-        index += 1
-    return f"{candidate}_{index}"
+    return normalize_phone(phone_number)
 
 
 def _entry_phones(entry: dict) -> list[str]:
@@ -80,17 +58,18 @@ def _entry_phones(entry: dict) -> list[str]:
     return list(dict.fromkeys(normalized))
 
 
+def _contact_key(name: str, phone: str, existing: dict) -> str:
+    keys = set(existing) if isinstance(existing, dict) else set(existing or ())
+    return contact_key(name, phone, keys)
+
+
 def _build_entry(contact: dict, phones: list[str], previous: dict | None = None) -> dict:
-    display_name = contact["display_name"]
     entry = dict(previous or {})
-    entry["display_name"] = display_name
-    previous_phones = set(_entry_phones(previous or {}))
-    if previous is None or previous_phones != set(phones):
-        entry["value"] = f"+{phones[0]}"
-        entry["phones"] = [{"number": f"+{phone}"} for phone in phones]
-    resource_name = contact.get("resource_name")
-    if resource_name and (previous is None or "google_resource_name" in previous):
-        entry["google_resource_name"] = resource_name
+    entry["display_name"] = contact["display_name"]
+    entry["value"] = f"+{phones[0]}"
+    entry["phones"] = [{"number": f"+{phone}"} for phone in phones]
+    if contact.get("resource_name"):
+        entry["google_resource_name"] = contact["resource_name"]
     return entry
 
 
@@ -105,7 +84,7 @@ def _find_match(local: dict, contact: dict, phones: list[str]) -> tuple[str | No
         for key, entry in local.items():
             if isinstance(entry, dict) and phone_set.intersection(_entry_phones(entry)):
                 return key, entry
-    normalized_name = _normalize_lookup(contact["display_name"])
+    normalized_name = _normalize_lookup(contact.get("display_name", ""))
     if normalized_name:
         for key, entry in local.items():
             if isinstance(entry, dict) and _normalize_lookup(str(entry.get("display_name") or key)) == normalized_name:
@@ -113,45 +92,35 @@ def _find_match(local: dict, contact: dict, phones: list[str]) -> tuple[str | No
     return None, None
 
 
-def _read_phone_book() -> dict:
-    if not PHONEBOOK_FILE.exists():
-        return {}
-    data = json.loads(PHONEBOOK_FILE.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("Local telefon kitabçasının strukturu düzgün deyil.")
-    return data
-
-
-def _write_atomic(phone_book: dict) -> None:
-    PHONEBOOK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(prefix="phone_book_", suffix=".json", dir=str(PHONEBOOK_FILE.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(phone_book, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-        os.replace(temp_path, PHONEBOOK_FILE)
-    except Exception:
-        try:
-            os.unlink(temp_path)
-        except OSError:
-            pass
-        raise
+def _contact_result(contact: dict, query: dict | None = None, meta: dict | None = None) -> dict:
+    resource_name = str(contact.get("resource_name") or contact.get("google_resource_name") or "")
+    item = dict(contact)
+    item["id"] = f"contact:{resource_name}" if resource_name else f"contact:{_normalize_lookup(str(contact.get('display_name') or ''))}"
+    item["google_resource_name"] = resource_name
+    return make_result("contact", "success", query=query or {}, data=[item], selected=item, meta=meta or {})
 
 
 def _reconcile_local_create(contact: dict) -> None:
-    local = _read_phone_book()
+    display_name = str(contact.get("display_name") or "").strip()
     phones = [_normalize_phone(str(phone)) for phone in contact.get("phones") or []]
-    if not contact.get("display_name") or not phones:
-        raise ValueError("Google kontaktının local phone book üçün adı və telefonu yoxdur.")
-    key, previous = _find_match(local, contact, phones)
-    if key is None:
-        key = _contact_key(contact["display_name"], phones[0], local)
-    entry = _build_entry(contact, phones, previous)
-    resource_name = str(contact.get("resource_name") or "").strip()
-    if resource_name:
-        entry["google_resource_name"] = resource_name
-    local[key] = entry
-    _write_atomic(local)
+    if not display_name or not phones:
+        raise ValueError("Google kontaktının SQL üçün adı və telefonu yoxdur.")
+    existing = find_contact(
+        display_name=display_name,
+        phone=phones[0],
+        google_resource_name=str(contact.get("resource_name") or ""),
+    )
+    metadata = {}
+    if existing:
+        metadata = {key: value for key, value in existing.items() if key not in {"id", "contact_key", "display_name", "value", "phones", "google_resource_name", "source", "status"}}
+    upsert_contact(
+        display_name=display_name,
+        phones=phones,
+        google_resource_name=str(contact.get("resource_name") or ""),
+        contact_key_value=existing.get("contact_key", "") if existing else "",
+        source="google",
+        metadata=metadata,
+    )
 
 
 def _reconcile_local_update(contact: dict) -> None:
@@ -159,96 +128,76 @@ def _reconcile_local_update(contact: dict) -> None:
 
 
 def _reconcile_local_delete(resource_name: str) -> bool:
-    local = _read_phone_book()
-    key = next((key for key, entry in local.items() if isinstance(entry, dict) and entry.get("google_resource_name") == resource_name), None)
-    if key is None:
-        return False
-    del local[key]
-    _write_atomic(local)
-    return True
-
-
-def _contact_result(contact: dict, query: dict | None = None, meta: dict | None = None) -> dict:
-    resource_name = str(contact.get("resource_name") or "")
-    item = dict(contact)
-    item["id"] = f"contact:{resource_name}" if resource_name else f"contact:{_normalize_lookup(str(contact.get('display_name') or ''))}"
-    item["google_resource_name"] = resource_name
-    return make_result("contact", "success", query=query or {}, data=[item], selected=item, meta=meta or {})
+    return delete_sql_contact(resource_name)
 
 
 def sync_google_contacts() -> dict:
     try:
-        local = _read_phone_book()
-    except (json.JSONDecodeError, OSError, ValueError) as exc:
-        return make_result("contact", "error", data=[], meta={"error": str(exc)})
-    try:
         google_contacts = get_google_contacts()
     except Exception as exc:
-        return make_result(
-            "contact",
-            "error",
-            data=[],
-            meta={"error": f"Google kontaktları alınmadı: {exc}"},
-        )
+        return make_result("contact", "error", data=[], meta={"error": f"Google kontaktları alınmadı: {exc}"})
 
-    merged = dict(local)
     added = updated = unchanged = removed = 0
-    seen_google_phones: set[str] = set()
-    seen_google_resources: set[str] = set()
-    google_resource_names: set[str] = set()
+    seen_resources: set[str] = set()
+    seen_phones: set[str] = set()
+
     try:
         for contact in google_contacts:
             display_name = str(contact.get("display_name") or "").strip()
             phones = []
             for raw_phone in contact.get("phones") or []:
                 try:
-                    normalized = _normalize_phone(str(raw_phone))
+                    phone = _normalize_phone(str(raw_phone))
                 except ValueError:
                     continue
-                if normalized not in phones:
-                    phones.append(normalized)
+                if phone not in phones:
+                    phones.append(phone)
             if not display_name or not phones:
                 continue
-            resource_name = str(contact.get("resource_name") or "")
-            if resource_name:
-                google_resource_names.add(resource_name)
-            if resource_name and resource_name in seen_google_resources:
+
+            resource_name = str(contact.get("resource_name") or "").strip()
+            if resource_name and resource_name in seen_resources:
                 continue
             if resource_name:
-                seen_google_resources.add(resource_name)
-            phone_set = set(phones)
-            if phone_set.intersection(seen_google_phones):
+                seen_resources.add(resource_name)
+            if set(phones).intersection(seen_phones):
                 continue
-            seen_google_phones.update(phone_set)
-            normalized_contact = {"display_name": display_name, "resource_name": resource_name}
-            key, previous = _find_match(merged, normalized_contact, phones)
-            if key is None:
-                key = _contact_key(display_name, phones[0], merged)
-                merged[key] = _build_entry(normalized_contact, phones)
+            seen_phones.update(phones)
+
+            existing = find_contact(
+                display_name=display_name,
+                phone=phones[0],
+                google_resource_name=resource_name,
+            )
+            if existing is None:
+                upsert_contact(display_name, phones, resource_name, source="google")
                 added += 1
                 continue
-            desired = _build_entry(normalized_contact, phones, previous)
-            if desired == previous:
+
+            before = (existing["display_name"], tuple(item["number"] for item in existing["phones"]), existing.get("google_resource_name", ""))
+            upsert_contact(
+                display_name,
+                phones,
+                resource_name,
+                contact_key_value=existing.get("contact_key", ""),
+                source="google",
+            )
+            after = (display_name, tuple(f"+{phone}" for phone in phones), resource_name)
+            if before == after:
                 unchanged += 1
             else:
-                merged[key] = desired
                 updated += 1
-        for key, entry in list(merged.items()):
-            if isinstance(entry, dict) and entry.get("google_resource_name") and entry.get("google_resource_name") not in google_resource_names:
-                del merged[key]
-                removed += 1
-        if merged != local:
-            _write_atomic(merged)
+
+        active_contacts = list_contacts()
+        for contact in active_contacts:
+            resource_name = str(contact.get("google_resource_name") or "")
+            if resource_name and resource_name not in seen_resources:
+                if delete_sql_contact(resource_name):
+                    removed += 1
     except Exception as exc:
         return make_result("contact", "error", data=[], meta={"error": str(exc)})
 
-    stats = {
-        "id": "contact:sync",
-        "new": added,
-        "updated": updated,
-        "removed": removed,
-        "unchanged": unchanged,
-    }
+    stats = {"id": "contact:sync", "new": added, "updated": updated, "removed": removed, "unchanged": unchanged}
     status = "success" if added or updated or removed else "empty"
     return make_result("contact", status, data=[stats], meta={"sync": True})
 
