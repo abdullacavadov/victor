@@ -1,10 +1,9 @@
 """
-WhatsApp mesaj gönderme — Windows için WhatsApp Desktop URI scheme veya Web.
+WhatsApp mesaj göndərmə — Windows üçün WhatsApp Desktop URI scheme və ya Web.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -14,7 +13,8 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
-from memory.memory_manager import load_memory, update_memory
+from memory.contacts_repository import list_contacts
+from memory.contacts_repository import upsert_contact
 
 try:
     import pyperclip
@@ -30,26 +30,29 @@ except ImportError:
 
 
 AUTO_SEND_DELAY_SECONDS = 2.4
-# WhatsApp penceresinin açılıp sohbetin yüklenmesi için bekleme süreleri.
-# Cold start (uygulama kapalıyken ilk açılış) uzun sürdüğü için cömert tutuldu.
+# WhatsApp pəncərəsinin açılıb söhbətin yüklənməsi üçün gözləmə müddətləri.
 DESKTOP_LOAD_DELAY = 4.5
 WEB_LOAD_DELAY = 6.5
-BASE_DIR = Path(__file__).resolve().parent.parent
-PHONEBOOK_FILE = BASE_DIR / "memory" / "phone_book.json"
 PREFERRED_BROWSERS = ["chrome", "msedge", "firefox"]
 
 
 def _normalize_phone(phone_number: str) -> str:
-    digits = re.sub(r"\D+", "", phone_number or "")
-    if len(digits) == 11 and digits.startswith("0"):
-        digits = "90" + digits[1:]
-    elif len(digits) == 10:
-        digits = "90" + digits
+    raw = str(phone_number or "").strip()
+    digits = re.sub(r"\D+", "", raw)
+    if raw.startswith("+"):
+        if not 8 <= len(digits) <= 15:
+            raise ValueError("Telefon nömrəsi etibarlı beynəlxalq formatda deyil.")
+        return digits
+    if digits.startswith("994"):
+        pass
+    elif digits.startswith("0") and len(digits) in (10, 11):
+        digits = "994" + digits[1:]
+    elif len(digits) == 9:
+        digits = "994" + digits
+    else:
+        raise ValueError("Telefon nömrəsi etibarlı beynəlxalq formatda deyil.")
     if len(digits) < 8 or len(digits) > 15:
-        raise ValueError(
-            "Telefon nömrəsi beynəlxalq formatda olmalıdır. "
-            "Örn: +99450xxxxxxx"
-        )
+        raise ValueError("Telefon nömrəsi etibarlı beynəlxalq formatda deyil.")
     return digits
 
 
@@ -66,42 +69,14 @@ def _contact_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", _normalize_lookup(name)).strip("_") or "contact"
 
 
-def _load_contacts() -> dict:
-    memory = load_memory()
-    contacts = memory.get("whatsapp_contacts", {})
-    return contacts if isinstance(contacts, dict) else {}
-
-
-def _load_phone_book() -> dict:
-    try:
-        if PHONEBOOK_FILE.exists():
-            return json.loads(PHONEBOOK_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-
-def _save_phone_book(phone_book: dict):
-    PHONEBOOK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PHONEBOOK_FILE.write_text(
-        json.dumps(phone_book, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
 def _contact_candidates() -> list[dict]:
+    """Kontaktları yalnız SQL-dən oxuyur."""
     candidates = []
-    for source_name, source in (("whatsapp", _load_contacts()), ("phone_book", _load_phone_book())):
-        if not isinstance(source, dict):
-            continue
-        for key, entry in source.items():
-            if not isinstance(entry, dict):
-                continue
-            item = dict(entry)
-            item.setdefault("display_name", key)
-            item["_source"] = source_name
-            item["_key"] = key
-            candidates.append(item)
+    for entry in list_contacts():
+        item = dict(entry)
+        item["_source"] = "contacts"
+        item["_key"] = item.get("contact_key", "")
+        candidates.append(item)
     return candidates
 
 
@@ -130,14 +105,15 @@ def _find_contact(recipient_name: str) -> dict | None:
     best_score = 0
     for entry in _contact_candidates():
         names = [entry.get("display_name", ""), entry.get("_key", "")]
-        aliases = entry.get("aliases", [])
-        if isinstance(aliases, list):
-            names.extend(str(alias) for alias in aliases)
-        elif aliases:
-            names.append(str(aliases))
-
+        metadata = entry.get("metadata", {})
+        if isinstance(metadata, dict):
+            aliases = metadata.get("aliases", [])
+            if isinstance(aliases, list):
+                names.extend(str(alias) for alias in aliases)
+            elif aliases:
+                names.append(str(aliases))
         for name in names:
-            score = _match_score(needle, name)
+            score = _match_score(needle, str(name))
             if score > best_score:
                 best_score = score
                 best_match = entry
@@ -147,28 +123,19 @@ def _find_contact(recipient_name: str) -> dict | None:
 
 def _contact_phone_candidates(contact: dict) -> list[str]:
     values = []
-    for key in ("value", "phone_number", "phone", "number", "mobile", "tel"):
-        value = contact.get(key)
-        if isinstance(value, (str, int)) and str(value).strip():
-            values.append(str(value).strip())
+    value = contact.get("value")
+    if isinstance(value, (str, int)) and str(value).strip():
+        values.append(str(value).strip())
 
-    for key in ("numbers", "phones", "phone_numbers"):
-        value = contact.get(key)
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                if isinstance(item, (str, int)) and str(item).strip():
-                    values.append(str(item).strip())
-                elif isinstance(item, dict):
-                    for nested_key in ("value", "number", "phone", "phone_number", "mobile", "tel"):
-                        nested = item.get(nested_key)
-                        if isinstance(nested, (str, int)) and str(nested).strip():
-                            values.append(str(nested).strip())
-        elif isinstance(value, dict):
-            for nested_key in ("value", "number", "phone", "phone_number", "mobile", "tel"):
-                nested = value.get(nested_key)
-                if isinstance(nested, (str, int)) and str(nested).strip():
-                    values.append(str(nested).strip())
-
+    phones = contact.get("phones", [])
+    if isinstance(phones, list):
+        for item in phones:
+            if isinstance(item, dict):
+                number = item.get("number") or item.get("phone_number") or item.get("phone")
+                if isinstance(number, (str, int)) and str(number).strip():
+                    values.append(str(number).strip())
+            elif isinstance(item, (str, int)) and str(item).strip():
+                values.append(str(item).strip())
     return values
 
 
@@ -183,7 +150,7 @@ def _resolve_contact_phone(contact: dict) -> str:
 
 def save_whatsapp_contact(display_name: str, phone_number: str, aliases: str = "") -> str:
     if not display_name or not display_name.strip():
-        return "Kişi adı boş olamaz."
+        return "Kontakt adı boş ola bilməz."
 
     try:
         normalized_phone = _normalize_phone(phone_number)
@@ -194,29 +161,22 @@ def save_whatsapp_contact(display_name: str, phone_number: str, aliases: str = "
     if aliases and aliases.strip():
         alias_list = [part.strip() for part in aliases.split(",") if part.strip()]
 
-    key = _contact_key(display_name)
-    update_memory(
-        {
-            "whatsapp_contacts": {
-                key: {
-                    "value": f"+{normalized_phone}",
-                    "display_name": display_name.strip(),
-                    "aliases": alias_list,
-                }
-            }
-        }
+    upsert_contact(
+        display_name=display_name.strip(),
+        phones=[f"+{normalized_phone}"],
+        source="whatsapp",
+        metadata={"aliases": alias_list} if alias_list else None,
     )
 
     if alias_list:
-        return f"{display_name.strip()} WhatsApp kontaktlarında Saxlanıldı. Ləqəblər: {', '.join(alias_list)}"
-    return f"{display_name.strip()} WhatsApp kontaktlarında Saxlanıldı."
+        return f"{display_name.strip()} WhatsApp kontaktlarında saxlanıldı. Ləqəblər: {', '.join(alias_list)}"
+    return f"{display_name.strip()} WhatsApp kontaktlarında saxlanıldı."
 
 
 def _copy_to_clipboard(text: str) -> None:
     if HAS_PYPERCLIP:
         pyperclip.copy(text)
         return
-    # PowerShell fallback
     safe = text.replace("'", "`'")
     subprocess.run(
         ["powershell", "-Command", f"Set-Clipboard -Value '{safe}'"],
@@ -329,11 +289,8 @@ def send_whatsapp_message(
 
     if app_target in {"auto", "desktop"}:
         if normalized_phone:
-            source_note = " (kontaktdan tapııldı)" if contact_source == "phone_book" else ""
+            source_note = " (kontaktlardan tapıldı)" if contact_source else ""
             label = resolved_name or f"+{normalized_phone}"
-            # URI text sahəsini istifadə edirik: draft da, birbaşa göndəriş də eyni
-            # mesaj məzmunundan başlayır. send_now üçün ayrıca typing etmədiyimizə
-            # görə mövcud draftın üstünə ikinci dəfə mətn yazılmır.
             ok, detail = _open_whatsapp_desktop_via_scheme(
                 normalized_phone, message, include_text=True
             )
@@ -358,7 +315,7 @@ def send_whatsapp_message(
             )
         return "WhatsApp mesajı üçün kontakt adı və ya telefon nömrəsi tələb olunur."
 
-    source_note = " (kontaklardan tapıldı)" if contact_source == "phone_book" else ""
+    source_note = " (kontaktlardan tapıldı)" if contact_source else ""
     label = resolved_name or f"+{normalized_phone}"
 
     ok, detail = _open_whatsapp_web(normalized_phone, message, include_text=True)
@@ -383,13 +340,12 @@ def send_whatsapp_message(
         return f"WhatsApp Web üzərindən {label}{source_note} şəxsə mesaj göndərildi."
     except Exception as exc:
         return (
-            f"WhatsApp Web açıldı, amma, avtomatik göndərim baş tutmadı: {exc}. "
+            f"WhatsApp Web açıldı, amma, avtomatik göndəriş baş tutmadı: {exc}. "
             "Enter'a basaraq göndərə bilərsən."
         )
 
 
-# ── vCard (.vcf) rehber içe aktarma ──────────────────────────────────────────
-# macOS sürümüyle aynı: telefon rehberini (.vcf) toplu olarak kalıcı belleğe alır.
+# ── vCard (.vcf) rehber idxalı ──────────────────────────────────────────────
 
 def _unfold_vcf_lines(text: str) -> list[str]:
     unfolded = []
@@ -405,15 +361,13 @@ def _unfold_vcf_lines(text: str) -> list[str]:
 def import_phone_book_from_vcf(vcf_path: str) -> str:
     source = Path(vcf_path).expanduser()
     if not source.exists():
-        return f"Rehber dosyası bulunamadı: {source}"
+        return f"Rehber faylı tapılmadı: {source}"
 
     try:
         text = source.read_text(encoding="utf-8", errors="ignore")
     except Exception as exc:
-        return f"Rehber dosyası okunamadı: {exc}"
+        return f"Rehber faylı oxunmadı: {exc}"
 
-    entries = {}
-    current_lines = []
     imported = 0
     skipped = 0
 
@@ -422,7 +376,6 @@ def import_phone_book_from_vcf(vcf_path: str) -> str:
         if not lines:
             return
         display_name = ""
-        aliases = []
         numbers = []
         for line in lines:
             upper = line.upper()
@@ -451,18 +404,17 @@ def import_phone_book_from_vcf(vcf_path: str) -> str:
             skipped += 1
             return
 
-        if " " in display_name:
-            aliases.extend(part for part in display_name.split() if len(part) > 1)
-        key = _contact_key(display_name)
-        entries[key] = {
-            "display_name": display_name,
-            "value": normalized_numbers[0],
-            "numbers": normalized_numbers,
-            "aliases": sorted({alias for alias in aliases if _normalize_lookup(alias) != _normalize_lookup(display_name)}),
-            "source": "vcf_import",
-        }
-        imported += 1
+        try:
+            upsert_contact(
+                display_name=display_name,
+                phones=normalized_numbers,
+                source="vcf_import",
+            )
+            imported += 1
+        except (TypeError, ValueError):
+            skipped += 1
 
+    current_lines = []
     for line in _unfold_vcf_lines(text):
         if line.upper() == "BEGIN:VCARD":
             current_lines = []
@@ -472,7 +424,4 @@ def import_phone_book_from_vcf(vcf_path: str) -> str:
         else:
             current_lines.append(line)
 
-    phone_book = _load_phone_book()
-    phone_book.update(entries)
-    _save_phone_book(phone_book)
-    return f"{imported} rehber kişisi içe aktarıldı, {skipped} kayıt atlandı."
+    return f"{imported} rehber şəxsi SQL kontaktlarına idxal edildi, {skipped} qeyd atlandı."
