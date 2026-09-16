@@ -7,10 +7,7 @@ __pycache__/
 .swift-cache/
 .swift-home/
 
-#memory
-memory/memory.json
-memory/phone_book.json
-memory/reminders.json
+
 
 # SQLite database
 # Baza faylı lokal yaradılır və Git-ə daxil edilmir.
