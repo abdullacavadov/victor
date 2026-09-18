@@ -17,6 +17,7 @@ from actions.agenda import get_daily_agenda, add_agenda_item, delete_agenda_item
 from actions.email import delete_email, prepare_email_deletion, prepare_email_reply, prepare_new_email, prepare_trash_emails, read_email_thread, search_emails, read_email, send_email, trash_emails
 from actions.browser import browser_control
 from actions.shell import shell_run
+from actions.database import execute_database_query
 from actions.whatsapp import send_whatsapp_message, save_whatsapp_contact
 from actions.whatsapp_meta import send_whatsapp_business_message
 from actions.whatsapp_read_action import read_whatsapp_conversations, read_whatsapp_messages
@@ -36,8 +37,9 @@ from core.contact_tool_defs import CONTACT_TOOL_DECLARATIONS
 from core.email_tool_defs import EMAIL_TOOL_DECLARATIONS
 from core.whatsapp_tool_defs import WHATSAPP_TOOL_DECLARATIONS
 from core.task_tool_defs import TASK_TOOL_DECLARATIONS
+from core.database_tool_defs import DATABASE_TOOL_DECLARATIONS
 
-for _declaration in [*EMAIL_TOOL_DECLARATIONS, *CONTACT_TOOL_DECLARATIONS, *WHATSAPP_TOOL_DECLARATIONS, *TASK_TOOL_DECLARATIONS]:
+for _declaration in [*EMAIL_TOOL_DECLARATIONS, *CONTACT_TOOL_DECLARATIONS, *WHATSAPP_TOOL_DECLARATIONS, *TASK_TOOL_DECLARATIONS, *DATABASE_TOOL_DECLARATIONS]:
     if not any(item.get("name") == _declaration["name"] for item in _tool_defs.TOOL_DECLARATIONS): _tool_defs.TOOL_DECLARATIONS.append(_declaration)
 
 
@@ -163,6 +165,32 @@ class ToolExecutor:
     def _gate_risky_action(self, name: str, args: dict):
         risky = {"delete_calendar_event", "delete_reminder", "delete_contact", "delete_victor_reminder", "delete_memory", "send_email", "send_whatsapp_business_message", "delete_email", "trash_emails"}
         if name == "send_whatsapp_message" and bool(args.get("send_now", False)): risky.add(name)
+
+        if name == "database_query":
+            statement = str(args.get("sql", "")).lstrip()
+
+            while statement.startswith("--"):
+                newline = statement.find("\n")
+                if newline == -1:
+                    statement = ""
+                    break
+                statement = statement[newline + 1:].lstrip()
+
+            while statement.startswith("/*"):
+                end = statement.find("*/", 2)
+                if end == -1:
+                    statement = ""
+                    break
+                statement = statement[end + 2:].lstrip()
+
+            sql_type = statement.split(None, 1)[0].upper() if statement else ""
+
+            if sql_type not in {"UPDATE", "DELETE"}:
+                return None
+
+            risky.add(name)
+
+
         if name not in risky: return None
         confirmation_id = str(args.get("confirmation_id", "")).strip(); payload = self._confirmation_payload(name, args)
         if not confirmation_id:
@@ -171,6 +199,9 @@ class ToolExecutor:
         consume_confirmation(confirmation_id, name, payload); self._pending_confirmations.pop(confirmation_id, None); return None
 
     def _confirmed_action(self, name: str, args: dict):
+        if name == "database_query":
+            return execute_database_query(args.get("sql", ""))
+
         if name == "send_email": return send_email(args.get("draft_id", ""), "")
         if name == "delete_memory": return delete_memory(args.get("category", ""), args.get("key", ""), args.get("match_text", ""))
         if name == "delete_email": return delete_email(args.get("confirmation_id", ""))
@@ -243,6 +274,11 @@ class ToolExecutor:
                 elif name == "update_contact": result = await loop.run_in_executor(None, lambda: update_contact(args.get("resource_name", ""), args.get("display_name", ""), args.get("phone_number", ""))) or "Google kontaktı yaradıldı."
                 elif name == "delete_contact": result = await loop.run_in_executor(None, lambda: delete_contact(args.get("resource_name", ""))) or "Google kontaktı silindi."
                 elif name == "browser_control": result = await loop.run_in_executor(None, lambda: browser_control(args.get("action"), args.get("url"), args.get("query"))) or "Tamam."
+                elif name == "database_query":
+                    result = await loop.run_in_executor(
+                        None,
+                        lambda: execute_database_query(args.get("sql", "")),
+                    )
                 elif name == "shell_run": result = await loop.run_in_executor(None, lambda: shell_run(args.get("command", ""))) or "Əmr icra edildi."
                 elif name == "play_media": result = await loop.run_in_executor(None, lambda: play_media(args.get("query", ""), args.get("provider", "auto"), bool(args.get("autoplay", True)))) or "Media oxudulmağa başladı."
                 elif name == "get_youtube_channel_report": result = await loop.run_in_executor(None, lambda: get_youtube_channel_report(args.get("query", "overview"), args.get("handle", ""), int(args.get("video_limit", 6) or 6))) or "YouTube kanal hesabatı alındı."

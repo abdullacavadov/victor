@@ -231,3 +231,120 @@ def test_add_reminder_is_dispatched_to_action(mock_add_reminder):
     )
     assert "əlavə edildi" in response.response["result"]
     executor.ui.play_success_sfx.assert_called_once()
+
+@patch("core.tool_executor.execute_database_query", return_value={
+    "type": "database",
+    "status": "success",
+    "data": [{"id": 1, "display_name": "Test"}],
+    "count": 1,
+    "meta": {"statement": "SELECT"},
+})
+def test_database_query_select_is_dispatched(mock_query):
+    executor, *_ = make_executor()
+
+    fc = SimpleNamespace(
+        id="database-select-1",
+        name="database_query",
+        args={"sql": "SELECT id, display_name FROM users"},
+    )
+
+    response = asyncio.run(executor.execute(fc))
+
+    mock_query.assert_called_once_with("SELECT id, display_name FROM users")
+    assert response.response["result"]["status"] == "success"
+
+
+@patch("core.tool_executor.execute_database_query", return_value={
+    "type": "database",
+    "status": "success",
+    "data": [],
+    "count": 1,
+    "meta": {"statement": "INSERT", "last_insert_id": 10},
+})
+def test_database_query_insert_is_dispatched(mock_query):
+    executor, *_ = make_executor()
+
+    fc = SimpleNamespace(
+        id="database-insert-1",
+        name="database_query",
+        args={
+            "sql": (
+                "INSERT INTO users(external_key, display_name, created_at, updated_at) "
+                "VALUES ('test', 'Test', 'now', 'now')"
+            )
+        },
+    )
+
+    response = asyncio.run(executor.execute(fc))
+
+    mock_query.assert_called_once()
+    assert response.response["result"]["status"] == "success"
+
+
+@patch("core.tool_executor.execute_database_query")
+def test_database_query_update_requires_confirmation(mock_query):
+    executor, *_ = make_executor()
+
+    fc = SimpleNamespace(
+        id="database-update-1",
+        name="database_query",
+        args={"sql": "UPDATE users SET display_name = 'Changed' WHERE id = 1"},
+    )
+
+    response = asyncio.run(executor.execute(fc))
+
+    mock_query.assert_not_called()
+    assert response.response["result"]["status"] == "needs_confirmation"
+    assert response.response["result"]["meta"]["requires_confirmation"] is True
+    assert response.response["result"]["meta"]["confirmation_action"] == "database_query"
+
+
+@patch("core.tool_executor.execute_database_query", return_value={
+    "type": "database",
+    "status": "success",
+    "data": [],
+    "count": 1,
+    "meta": {"statement": "UPDATE"},
+})
+def test_database_query_update_executes_after_confirmation(mock_query):
+    executor, *_ = make_executor()
+
+    first_fc = SimpleNamespace(
+        id="database-update-2a",
+        name="database_query",
+        args={"sql": "UPDATE users SET display_name = 'Changed' WHERE id = 1"},
+    )
+
+    first_response = asyncio.run(executor.execute(first_fc))
+    token = first_response.response["result"]["meta"]["confirmation_id"]
+
+    confirm_fc = SimpleNamespace(
+        id="database-update-2b",
+        name="confirm_action",
+        args={"confirmation_id": token},
+    )
+
+    response = asyncio.run(executor.execute(confirm_fc))
+
+    mock_query.assert_called_once_with(
+        "UPDATE users SET display_name = 'Changed' WHERE id = 1"
+    )
+    assert response.response["result"]["status"] == "success"
+
+
+@patch("core.tool_executor.execute_database_query")
+def test_database_query_delete_requires_confirmation(mock_query):
+    executor, *_ = make_executor()
+
+    fc = SimpleNamespace(
+        id="database-delete-1",
+        name="database_query",
+        args={"sql": "DELETE FROM users WHERE id = 1"},
+    )
+
+    response = asyncio.run(executor.execute(fc))
+
+    mock_query.assert_not_called()
+    assert response.response["result"]["status"] == "needs_confirmation"
+    assert response.response["result"]["meta"]["requires_confirmation"] is True
+    assert response.response["result"]["meta"]["confirmation_action"] == "database_query"
