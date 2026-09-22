@@ -348,3 +348,26 @@ def test_database_query_delete_requires_confirmation(mock_query):
     assert response.response["result"]["status"] == "needs_confirmation"
     assert response.response["result"]["meta"]["requires_confirmation"] is True
     assert response.response["result"]["meta"]["confirmation_action"] == "database_query"
+
+
+@patch("core.tool_executor.get_database_schema", return_value={
+    "type": "database_schema",
+    "status": "success",
+    "data": [{"table": "contacts", "columns": [{"name": "id"}], "foreign_keys": []}],
+    "count": 1,
+    "meta": {"tables": 1},
+})
+def test_database_schema_is_dispatched(mock_schema):
+    executor, *_ = make_executor()
+
+    fc = SimpleNamespace(
+        id="database-schema-1",
+        name="database_schema",
+        args={},
+    )
+
+    response = asyncio.run(executor.execute(fc))
+
+    mock_schema.assert_called_once_with()
+    assert response.response["result"]["type"] == "database_schema"
+    assert response.response["result"]["status"] == "success"
