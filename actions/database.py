@@ -1,4 +1,4 @@
-﻿"""VICTOR SQLite verilənlər bazası əməliyyatları."""
+"""VICTOR SQLite verilənlər bazası əməliyyatları."""
 
 from __future__ import annotations
 
