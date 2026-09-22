@@ -1,4 +1,4 @@
-﻿"""VICTOR SQLite database_query alətinin deklarasiyası."""
+"""VICTOR SQLite database_query alətinin deklarasiyası."""
 
 DATABASE_TOOL_DECLARATIONS = [
     {
