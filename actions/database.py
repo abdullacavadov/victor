@@ -68,6 +68,63 @@ def _validate_sql(sql: str) -> str:
     return text
 
 
+def get_database_schema() -> dict[str, Any]:
+    """VICTOR üçün tətbiqə aid SQLite cədvəl və əlaqə sxemini qaytarır."""
+
+    initialize_database()
+
+    with transaction() as connection:
+        tables = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """
+        ).fetchall()
+
+        data = []
+        for table_row in tables:
+            table_name = table_row["name"]
+            escaped_name = table_name.replace('"', '""')
+            columns = connection.execute(
+                f'PRAGMA table_info("{escaped_name}")'
+            ).fetchall()
+            foreign_keys = connection.execute(
+                f'PRAGMA foreign_key_list("{escaped_name}")'
+            ).fetchall()
+
+            data.append(
+                {
+                    "table": table_name,
+                    "columns": [
+                        {
+                            "name": row["name"],
+                            "type": row["type"],
+                            "nullable": not bool(row["notnull"]),
+                            "primary_key": bool(row["pk"]),
+                        }
+                        for row in columns
+                    ],
+                    "foreign_keys": [
+                        {
+                            "column": row["from"],
+                            "references_table": row["table"],
+                            "references_column": row["to"],
+                        }
+                        for row in foreign_keys
+                    ],
+                }
+            )
+
+        return {
+            "type": "database_schema",
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "meta": {"tables": len(data)},
+        }
+
 def execute_database_query(sql: str) -> dict[str, Any]:
     """VICTOR-un SQLite bazasında təhlükəsiz tək SQL əməliyyatı icra edir."""
 
