@@ -17,7 +17,7 @@ from actions.agenda import get_daily_agenda, add_agenda_item, delete_agenda_item
 from actions.email import delete_email, prepare_email_deletion, prepare_email_reply, prepare_new_email, prepare_trash_emails, read_email_thread, search_emails, read_email, send_email, trash_emails
 from actions.browser import browser_control
 from actions.shell import shell_run
-from actions.database import execute_database_query
+from actions.database import execute_database_query, get_database_schema
 from actions.whatsapp import send_whatsapp_message, save_whatsapp_contact
 from actions.whatsapp_meta import send_whatsapp_business_message
 from actions.whatsapp_read_action import read_whatsapp_conversations, read_whatsapp_messages
@@ -274,6 +274,8 @@ class ToolExecutor:
                 elif name == "update_contact": result = await loop.run_in_executor(None, lambda: update_contact(args.get("resource_name", ""), args.get("display_name", ""), args.get("phone_number", ""))) or "Google kontaktı yaradıldı."
                 elif name == "delete_contact": result = await loop.run_in_executor(None, lambda: delete_contact(args.get("resource_name", ""))) or "Google kontaktı silindi."
                 elif name == "browser_control": result = await loop.run_in_executor(None, lambda: browser_control(args.get("action"), args.get("url"), args.get("query"))) or "Tamam."
+                elif name == "database_schema":
+                    result = await loop.run_in_executor(None, get_database_schema)
                 elif name == "database_query":
                     result = await loop.run_in_executor(
                         None,
